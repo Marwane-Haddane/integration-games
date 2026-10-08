@@ -10,6 +10,14 @@
   <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 </head>
 <body>
+  <!-- GDG 4-Color Floating Ambient Bubbles -->
+  <div class="gdg-ambient-wrap">
+    <div class="ambient-bubble b-blue"></div>
+    <div class="ambient-bubble b-red"></div>
+    <div class="ambient-bubble b-yellow"></div>
+    <div class="ambient-bubble b-green"></div>
+  </div>
+
   <!-- Header Bar -->
   <header class="navbar">
     <div class="brand">
@@ -196,13 +204,23 @@
         </div>
 
         <!-- 3D Cube Canvas -->
-        <div class="scene-3d-wrapper">
+        <div class="scene-3d-wrapper" id="scene-3d-wrapper">
           <div class="cube-3d-stage">
             <div class="cube-3d" id="cube-3d-root">
               <!-- Rendered via JS -->
             </div>
           </div>
         </div>
+
+        <!-- Quick 3D View Angles & Hint -->
+        <div class="cube-controls-bar">
+          <button type="button" class="btn-cube-view active" id="btn-view-default">🔄 3D View</button>
+          <button type="button" class="btn-cube-view" id="btn-view-front">🟢 Front</button>
+          <button type="button" class="btn-cube-view" id="btn-view-right">🔴 Right</button>
+          <button type="button" class="btn-cube-view" id="btn-view-top">⚪ Top</button>
+          <button type="button" class="btn-cube-view" id="btn-view-back">🔵 Back</button>
+        </div>
+        <div class="scene-drag-hint">👆 Drag anywhere on the cube with mouse or finger to rotate freely</div>
 
         <!-- Move Instruction Card -->
         <div class="move-card">

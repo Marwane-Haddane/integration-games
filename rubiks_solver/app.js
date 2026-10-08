@@ -90,6 +90,7 @@
     updateColorCounts();
     setupNetActions();
     setupSolutionControls();
+    setup3DDragControls();
     setupCamera();
     render3DCube();
   }
@@ -358,29 +359,65 @@
       moveDesc.textContent = 'All moves completed successfully!';
       if (isAutoPlaying) toggleAutoPlay();
     }
+    render3DCube();
   }
 
-  // Next / Prev Move Actions
+  let isAnimatingMove = false;
+
+  // Next / Prev Move Actions with 3D Turning Animation
   function nextMove() {
-    if (currentMoveIndex < solutionMoves.length) {
-      applyMoveToState(solutionMoves[currentMoveIndex]);
+    if (isAnimatingMove || currentMoveIndex >= solutionMoves.length) return;
+    isAnimatingMove = true;
+    const move = solutionMoves[currentMoveIndex];
+
+    // Trigger face turn twist animation
+    const faceKey = move[0].toLowerCase();
+    const faceEl = cube3dRoot ? cube3dRoot.querySelector(`.face-3d-${faceKey}`) : null;
+    if (faceEl) {
+      faceEl.style.transition = 'transform 0.22s ease-in-out, filter 0.22s ease';
+      faceEl.style.filter = 'brightness(1.35)';
+      const isCCW = move.includes("'");
+      const is180 = move.includes('2');
+      const angle = is180 ? '180deg' : (isCCW ? '-90deg' : '90deg');
+      faceEl.style.transform += ` rotateZ(${angle})`;
+    }
+
+    setTimeout(() => {
+      applyMoveToState(move);
       currentMoveIndex++;
       render3DCube();
       renderNet();
       renderSolutionUI();
-    }
+      isAnimatingMove = false;
+    }, 240);
   }
 
   function prevMove() {
-    if (currentMoveIndex > 0) {
-      currentMoveIndex--;
-      const m = solutionMoves[currentMoveIndex];
-      const invMove = invertMove(m);
+    if (isAnimatingMove || currentMoveIndex <= 0) return;
+    isAnimatingMove = true;
+    currentMoveIndex--;
+    const m = solutionMoves[currentMoveIndex];
+    const invMove = invertMove(m);
+
+    // Trigger inverse face turn twist animation
+    const faceKey = invMove[0].toLowerCase();
+    const faceEl = cube3dRoot ? cube3dRoot.querySelector(`.face-3d-${faceKey}`) : null;
+    if (faceEl) {
+      faceEl.style.transition = 'transform 0.22s ease-in-out, filter 0.22s ease';
+      faceEl.style.filter = 'brightness(1.35)';
+      const isCCW = invMove.includes("'");
+      const is180 = invMove.includes('2');
+      const angle = is180 ? '180deg' : (isCCW ? '-90deg' : '90deg');
+      faceEl.style.transform += ` rotateZ(${angle})`;
+    }
+
+    setTimeout(() => {
       applyMoveToState(invMove);
       render3DCube();
       renderNet();
       renderSolutionUI();
-    }
+      isAnimatingMove = false;
+    }, 240);
   }
 
   function invertMove(m) {
@@ -469,17 +506,22 @@
   }
 
   // 3D CSS Rubik's Cube Renderer
-  function render3DCube() {
+  function render3DCube(activeMove = null) {
     if (!cube3dRoot) return;
     cube3dRoot.innerHTML = '';
 
     const faces = ['f', 'b', 'r', 'l', 'u', 'd'];
     const faceKeys = ['F', 'B', 'R', 'L', 'U', 'D'];
+    const activeFace = activeMove ? activeMove[0] : (solutionMoves.length > 0 && currentMoveIndex < solutionMoves.length ? solutionMoves[currentMoveIndex][0] : null);
 
     faces.forEach((f, idx) => {
       const faceKey = faceKeys[idx];
       const faceEl = document.createElement('div');
       faceEl.className = `cube-face-3d face-3d-${f}`;
+
+      if (activeFace && activeFace === faceKey) {
+        faceEl.classList.add('face-turning');
+      }
 
       for (let i = 0; i < 9; i++) {
         const stk = document.createElement('div');
@@ -488,6 +530,84 @@
         faceEl.appendChild(stk);
       }
       cube3dRoot.appendChild(faceEl);
+    });
+  }
+
+  // 3D Orbit Interaction Controller (Drag to rotate & Preset views)
+  const sceneWrapper = document.getElementById('scene-3d-wrapper');
+  let rotX = -22;
+  let rotY = -38;
+  let isDragging = false;
+  let startX = 0;
+  let startY = 0;
+  let baseRotX = -22;
+  let baseRotY = -38;
+
+  function updateCubeTransform(smooth = false) {
+    if (!cube3dRoot) return;
+    if (smooth) {
+      cube3dRoot.style.transition = 'transform 0.35s cubic-bezier(0.2, 0.8, 0.3, 1)';
+      setTimeout(() => {
+        if (cube3dRoot) cube3dRoot.style.transition = '';
+      }, 360);
+    } else {
+      cube3dRoot.style.transition = '';
+    }
+    cube3dRoot.style.transform = `rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+  }
+
+  function setup3DDragControls() {
+    if (!sceneWrapper) return;
+
+    sceneWrapper.addEventListener('pointerdown', (e) => {
+      isDragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      baseRotX = rotX;
+      baseRotY = rotY;
+      sceneWrapper.setPointerCapture(e.pointerId);
+    });
+
+    sceneWrapper.addEventListener('pointermove', (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      rotY = baseRotY + dx * 0.7;
+      rotX = Math.max(-85, Math.min(85, baseRotX - dy * 0.7));
+      updateCubeTransform(false);
+    });
+
+    const onPointerEnd = (e) => {
+      if (isDragging) {
+        isDragging = false;
+        try { sceneWrapper.releasePointerCapture(e.pointerId); } catch (err) {}
+      }
+    };
+
+    sceneWrapper.addEventListener('pointerup', onPointerEnd);
+    sceneWrapper.addEventListener('pointercancel', onPointerEnd);
+
+    // Preset view angles
+    const viewButtons = [
+      { id: 'btn-view-default', rx: -22, ry: -38 },
+      { id: 'btn-view-front', rx: 0, ry: 0 },
+      { id: 'btn-view-right', rx: 0, ry: -90 },
+      { id: 'btn-view-top', rx: -90, ry: 0 },
+      { id: 'btn-view-back', rx: 0, ry: -180 }
+    ];
+
+    viewButtons.forEach(cfg => {
+      const btn = document.getElementById(cfg.id);
+      if (btn) {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          document.querySelectorAll('.btn-cube-view').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          rotX = cfg.rx;
+          rotY = cfg.ry;
+          updateCubeTransform(true);
+        });
+      }
     });
   }
 

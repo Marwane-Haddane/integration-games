@@ -34,9 +34,51 @@
 
   let selectedPaletteColor = 'W';
   let solutionMoves = [];
+  let solutionStartFacelet = null;
   let currentMoveIndex = 0;
   let isAutoPlaying = false;
   let autoPlayTimer = null;
+  let solutionVersion = 0;
+
+  let solverWorker = null;
+  let solverRequestId = 0;
+  const pendingSolves = new Map();
+
+  function solveInBackground(facelet) {
+    // Keep the original engine as a fallback for browsers without workers.
+    if (typeof Worker === 'undefined') {
+      return Promise.resolve(window.min2phase.solve(facelet));
+    }
+    if (!solverWorker) {
+      try {
+        solverWorker = new Worker('solver-worker.js');
+      } catch (error) {
+        return Promise.resolve(window.min2phase.solve(facelet));
+      }
+      solverWorker.onmessage = ({ data }) => {
+        const pending = pendingSolves.get(data.id);
+        if (!pending) return;
+        pendingSolves.delete(data.id);
+        if (data.error) pending.reject(new Error(data.error));
+        else pending.resolve(data.solution);
+      };
+      solverWorker.onerror = (event) => {
+        event.preventDefault();
+        solverWorker.terminate();
+        solverWorker = null;
+        for (const pending of pendingSolves.values()) {
+          try { pending.resolve(window.min2phase.solve(pending.facelet)); }
+          catch (error) { pending.reject(error); }
+        }
+        pendingSolves.clear();
+      };
+    }
+    return new Promise((resolve, reject) => {
+      const id = ++solverRequestId;
+      pendingSolves.set(id, { resolve, reject, facelet });
+      solverWorker.postMessage({ id, facelet });
+    });
+  }
 
   // Camera State
   let cameraStream = null;
@@ -92,7 +134,7 @@
     setupSolutionControls();
     setup3DDragControls();
     setupCamera();
-    render3DCube();
+    renderSolutionUI();
   }
 
   // Tabs Switching
@@ -133,6 +175,7 @@
         sticker.dataset.index = i;
 
         sticker.addEventListener('click', () => {
+          clearSolution();
           cubeState[face][i] = selectedPaletteColor;
           sticker.className = `sticker color-${selectedPaletteColor}${i === 4 ? ' center-sticker' : ''}`;
           updateColorCounts();
@@ -163,7 +206,7 @@
 
     if (allNine) {
       statusValidation.className = 'status-msg success';
-      statusValidation.textContent = '✓ Cube is balanced (9 stickers of each color). Ready to solve!';
+      statusValidation.textContent = '✓ Color counts match (9 of each). Solve Cube will check whether this cube is possible.';
     } else {
       statusValidation.className = 'status-msg';
       statusValidation.textContent = '';
@@ -172,6 +215,7 @@
 
   // Reset to Solved State
   function resetSolved() {
+    clearSolution();
     cubeState = {
       'U': Array(9).fill('W'),
       'L': Array(9).fill('O'),
@@ -187,6 +231,7 @@
 
   // Generate Random Scramble
   function generateScramble() {
+    clearSolution();
     if (window.min2phase && typeof window.min2phase.randomCube === 'function') {
       const facelet = window.min2phase.randomCube();
       parseFaceletToState(facelet);
@@ -259,8 +304,45 @@
   }
 
   // Solve Cube
-  function solveCube() {
+  function clearSolution() {
+    solutionVersion++;
+    if (isAutoPlaying) toggleAutoPlay();
+    isAnimatingMove = false;
+    solutionMoves = [];
+    solutionStartFacelet = null;
+    currentMoveIndex = 0;
+    renderSolutionUI();
+  }
+
+  function parseSolverResult(result) {
+    if (typeof result !== 'string') throw new Error('The solver returned an invalid response. Please try again.');
+    const errorMatch = /^Error\s+(\d+)\s*$/i.exec(result.trim());
+    if (errorMatch) {
+      const messages = {
+        1: 'Each color must appear exactly 9 times. Check the stickers in the 2D Net.',
+        2: 'Impossible cube: edge sticker combinations are missing or duplicated. Check the 2D Net.',
+        3: 'Impossible cube: one edge is flipped. Check the scanned colors and face orientation.',
+        4: 'Impossible cube: corner sticker combinations are missing or duplicated. Check the 2D Net.',
+        5: 'Impossible cube: a corner is twisted. Check the scanned colors and face orientation.',
+        6: 'Impossible cube: two pieces are swapped. Check the scanned colors and face orientation.',
+        7: 'No solution was found within the solver move limit. Please try again.',
+        8: 'The solver search limit was reached. Please try again.'
+      };
+      throw new Error(messages[errorMatch[1]] || 'The solver could not solve this cube. Please check the 2D Net.');
+    }
+    const moves = result.trim() ? result.trim().split(/\s+/) : [];
+    if (moves.some(move => !/^[URFDLB](?:2|')?$/.test(move))) {
+      throw new Error('The solver returned invalid moves. Please try again.');
+    }
+    return moves;
+  }
+
+  async function solveCube() {
+    if (btnSolve.disabled) return;
+    btnSolve.disabled = true;
     try {
+      clearSolution();
+      const version = solutionVersion;
       statusValidation.className = 'status-msg';
       statusValidation.textContent = '';
 
@@ -268,18 +350,23 @@
       let solutionRaw = '';
 
       if (window.min2phase && typeof window.min2phase.solve === 'function') {
-        solutionRaw = window.min2phase.solve(facelet);
+        solutionRaw = await solveInBackground(facelet);
       } else {
         throw new Error('Solver engine is still initializing. Please wait a second.');
       }
 
-      if (!solutionRaw || solutionRaw.trim() === '') {
+      // Edits remain responsive while solving; discard results for an old cube.
+      if (version !== solutionVersion || getStateToFacelet() !== facelet) return;
+
+      const moves = parseSolverResult(solutionRaw);
+      if (moves.length === 0) {
         statusValidation.className = 'status-msg success';
         statusValidation.textContent = '🎉 Cube is already completely solved!';
         return;
       }
 
-      solutionMoves = solutionRaw.trim().split(/\s+/).filter(m => m.length > 0);
+      solutionMoves = moves;
+      solutionStartFacelet = facelet;
       currentMoveIndex = 0;
 
       // Switch to solution tab
@@ -287,8 +374,14 @@
       renderSolutionUI();
 
     } catch (err) {
+      clearSolution();
       statusValidation.className = 'status-msg error';
       statusValidation.textContent = `❌ ${err.message}`;
+      if (document.getElementById('tab-solution').classList.contains('active')) {
+        document.querySelector('[data-tab="tab-net"]').click();
+      }
+    } finally {
+      btnSolve.disabled = false;
     }
   }
 
@@ -328,11 +421,12 @@
   function renderSolutionUI() {
     stepTotNum.textContent = solutionMoves.length;
     stepCurNum.textContent = currentMoveIndex;
-    progressFill.style.width = `${(currentMoveIndex / solutionMoves.length) * 100}%`;
+    progressFill.style.width = `${solutionMoves.length ? (currentMoveIndex / solutionMoves.length) * 100 : 0}%`;
 
     btnPrev.disabled = currentMoveIndex === 0;
     btnNext.disabled = currentMoveIndex >= solutionMoves.length;
     btnPlay.disabled = solutionMoves.length === 0;
+    btnResetPlay.disabled = solutionMoves.length === 0;
 
     // Render Ribbon
     ribbonContainer.innerHTML = '';
@@ -341,13 +435,16 @@
       el.className = `ribbon-move${idx === currentMoveIndex ? ' active' : ''}${idx < currentMoveIndex ? ' done' : ''}`;
       el.textContent = m;
       el.addEventListener('click', () => {
-        currentMoveIndex = idx;
-        renderSolutionUI();
+        seekSolution(idx);
       });
       ribbonContainer.appendChild(el);
     });
 
-    if (currentMoveIndex < solutionMoves.length) {
+    if (solutionMoves.length === 0) {
+      moveBadge.textContent = '—';
+      moveName.textContent = 'Ready to solve';
+      moveDesc.textContent = 'Click "Solve Cube" to begin';
+    } else if (currentMoveIndex < solutionMoves.length) {
       const curMove = solutionMoves[currentMoveIndex];
       moveBadge.textContent = curMove;
       const details = getMoveDetails(curMove);
@@ -368,6 +465,7 @@
   function nextMove() {
     if (isAnimatingMove || currentMoveIndex >= solutionMoves.length) return;
     isAnimatingMove = true;
+    const version = solutionVersion;
     const move = solutionMoves[currentMoveIndex];
 
     // Trigger face turn twist animation
@@ -383,6 +481,7 @@
     }
 
     setTimeout(() => {
+      if (version !== solutionVersion) return;
       applyMoveToState(move);
       currentMoveIndex++;
       render3DCube();
@@ -395,6 +494,7 @@
   function prevMove() {
     if (isAnimatingMove || currentMoveIndex <= 0) return;
     isAnimatingMove = true;
+    const version = solutionVersion;
     currentMoveIndex--;
     const m = solutionMoves[currentMoveIndex];
     const invMove = invertMove(m);
@@ -412,6 +512,7 @@
     }
 
     setTimeout(() => {
+      if (version !== solutionVersion) return;
       applyMoveToState(invMove);
       render3DCube();
       renderNet();
@@ -445,8 +546,19 @@
   }
 
   function resetPlayback() {
+    seekSolution(0);
+  }
+
+  function seekSolution(index) {
+    if (!solutionStartFacelet || index < 0 || index > solutionMoves.length) return;
     if (isAutoPlaying) toggleAutoPlay();
-    currentMoveIndex = 0;
+    // Rebuild the cube from the solve input, including when a turn is in flight.
+    solutionVersion++;
+    isAnimatingMove = false;
+    parseFaceletToState(solutionStartFacelet);
+    for (let i = 0; i < index; i++) applyMoveToState(solutionMoves[i]);
+    currentMoveIndex = index;
+    renderNet();
     renderSolutionUI();
   }
 
@@ -704,6 +816,7 @@
     }
 
     // Set detected face
+    clearSolution();
     cubeState[curFace] = detected;
     renderNet();
     updateColorCounts();

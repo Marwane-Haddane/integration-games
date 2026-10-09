@@ -71,7 +71,7 @@ let capturedExportUrl = null;
 
 // Preload GDG ENSAF Logo
 const gdgLogo = new Image();
-gdgLogo.src = 'logo.png';
+gdgLogo.src = '../logo.png';
 let isLogoLoaded = false;
 gdgLogo.onload = () => { isLogoLoaded = true; };
 
@@ -96,6 +96,8 @@ let touchDragPiece = null;
 let dragOffset = { x: 0, y: 0 };
 let maxZIndex = 10;
 let lastHandProcessTime = 0;
+let lastProcessedVideoTime = -1;
+let videoProcessingStarted = false;
 
 // Countdown Timing
 let countdownStartTime = 0;
@@ -214,24 +216,43 @@ function resizeCanvas() {
 function updateBoardLayout() {
   const w = window.innerWidth;
   const h = window.innerHeight;
-  // Board size comfortably placed in the center-top
-  const size = Math.min(w * 0.86, h * 0.48, 380);
+  const N = puzzleGridSize;
+  const selector = document.getElementById('diffSelector');
+  const headerBottom = document.querySelector('.top-bar').getBoundingClientRect().bottom;
+  instructionBanner.style.top = (headerBottom + 8) + 'px';
+  const bannerBottom = instructionBanner.getBoundingClientRect().bottom;
+  const wideControls = w >= 1100;
+  const sideTrays = w >= 700;
+  selector.style.top = (wideControls ? headerBottom + 8 : bannerBottom + 10) + 'px';
+  const contentTop = (wideControls ? bannerBottom : selector.getBoundingClientRect().bottom) + 16;
+  const contentBottom = h - document.querySelector('.bottom-bar').getBoundingClientRect().height - 12;
+  // Reserve enough room for every piece, without covering the controls or grid.
+  const availableHeight = Math.max(100, contentBottom - contentTop);
+  const trayColumns = Math.ceil(N / 2);
+  const sideTraySizeLimit = (w - 44 - 20 * (trayColumns - 1)) / (1 + 2 * trayColumns / N);
+  const size = Math.min(w * 0.86, h * 0.48, 380, sideTrays ? sideTraySizeLimit : Infinity,
+    sideTrays ? availableHeight : (availableHeight - 16 - (N - 1) * 10) / 2);
   boardRect = {
     x: (w - size) / 2,
-    y: Math.max(76, (h - size) / 2 - 35),
+    y: sideTrays ? Math.max(contentTop, (h - size) / 2 - 35) : contentTop,
     size: size
   };
 
-  const pieceSize = boardRect.size / 3;
+  const pieceSize = boardRect.size / N;
+  const loosePositions = getScatterPositions();
   puzzlePieces.forEach(p => {
     p.width = pieceSize;
     p.height = pieceSize;
     // If piece is currently placed in a slot, update its coordinates to that slot
     if (p.currentSlot !== null && p.currentSlot !== undefined) {
-      const c = p.currentSlot % 3;
-      const r = Math.floor(p.currentSlot / 3);
+      const c = p.currentSlot % N;
+      const r = Math.floor(p.currentSlot / N);
       p.currentX = boardRect.x + c * pieceSize;
       p.currentY = boardRect.y + r * pieceSize;
+    } else if (p.scatterIndex !== undefined) {
+      const position = loosePositions[p.scatterIndex];
+      p.currentX = position.x;
+      p.currentY = position.y;
     }
   });
 }
@@ -280,8 +301,9 @@ async function startCamera() {
 // MediaPipe Initialization: Face Mesh (Eyes) & Hands (Pinch)
 // -----------------------------------------------------------------------------
 async function initMediaPipe() {
+  if (isFaceMeshReady && isHandsReady) return;
   // 1. Initialize Face Mesh
-  if (typeof FaceMesh !== 'undefined') {
+  if (!isFaceMeshReady && typeof FaceMesh !== 'undefined') {
     let faceBase = './vendor/mediapipe/';
     try {
       const probe = await fetch('./vendor/mediapipe/face_mesh.binarypb', { method: 'HEAD' });
@@ -309,7 +331,7 @@ async function initMediaPipe() {
   }
 
   // 2. Initialize Hands
-  if (typeof Hands !== 'undefined') {
+  if (!isHandsReady && typeof Hands !== 'undefined') {
     let handsBase = './vendor/mediapipe/';
     try {
       const probe = await fetch('./vendor/mediapipe/hands.binarypb', { method: 'HEAD' });
@@ -460,11 +482,12 @@ function checkFist(pts) {
 // Continuous Video Frame Processing (Optimized for 60FPS)
 // -----------------------------------------------------------------------------
 async function processVideoFrame() {
-  if (video && video.readyState >= 2) {
+  if (!document.hidden && video && video.readyState >= 2 && video.currentTime !== lastProcessedVideoTime) {
     const now = performance.now();
     try {
       // In CAMERA state: process FaceMesh to detect eye closure
       if (currentState === STATE.CAMERA && isFaceMeshReady && faceMeshDetector) {
+        lastProcessedVideoTime = video.currentTime;
         await faceMeshDetector.send({ image: video });
       }
       // In PUZZLE / SOLVED states:
@@ -473,6 +496,7 @@ async function processVideoFrame() {
       else if ((currentState === STATE.PUZZLE || currentState === STATE.SOLVED) && isHandsReady && handsDetector) {
         if (!touchDragPiece && (now - lastHandProcessTime > 40)) { // Throttled to ~25 FPS max
           lastHandProcessTime = now;
+          lastProcessedVideoTime = video.currentTime;
           await handsDetector.send({ image: video });
         }
       }
@@ -520,6 +544,7 @@ function setAppState(newState) {
     modeBadge.textContent = 'SAVING...';
     saveToast.classList.remove('hidden');
   }
+  if (newState === STATE.CAMERA || newState === STATE.PUZZLE) updateBoardLayout();
 }
 
 function updateInstructionUI() {
@@ -531,7 +556,7 @@ function updateInstructionUI() {
     bannerText.textContent = 'Open eyes & smile! Snapping in 3s...';
   } else if (currentState === STATE.PUZZLE) {
     bannerIcon.textContent = '🧩';
-    bannerText.textContent = 'Drag pieces into the 3x3 grid slots';
+    bannerText.textContent = `Drag pieces into the ${puzzleGridSize}x${puzzleGridSize} grid slots`;
   } else if (currentState === STATE.SOLVED) {
     bannerIcon.textContent = '🎉';
     bannerText.textContent = 'Puzzle Solved! Tap "Save Photo" below';
@@ -679,41 +704,61 @@ function buildPuzzlePieces() {
   scatterPieces();
 }
 
-function scatterPieces() {
+function getScatterPositions() {
   const N = puzzleGridSize;
-  const totalPieces = N * N;
   const w = window.innerWidth;
-  const h = window.innerHeight;
   const pieceW = boardRect.size / N;
+  const margin = 12;
+  const gap = 10;
+  const positions = [];
+  if (w >= 700) {
+    const cols = Math.ceil(N / 2);
+    const sideWidth = boardRect.x - margin - gap;
+    const stepX = (sideWidth - pieceW) / Math.max(1, cols - 1);
+    for (let row = 0; row < N; row++) {
+      for (let col = 0; col < cols; col++) {
+        const y = boardRect.y + row * pieceW;
+        positions.push({ x: margin + col * stepX, y });
+        positions.push({ x: boardRect.x + boardRect.size + gap + col * stepX, y });
+      }
+    }
+  } else {
+    const stepX = (w - margin * 2 - pieceW) / Math.max(1, N - 1);
+    for (let row = 0; row < N; row++) {
+      for (let col = 0; col < N; col++) {
+        positions.push({ x: margin + col * stepX,
+          y: boardRect.y + boardRect.size + 16 + row * (pieceW + gap) });
+      }
+    }
+  }
+  return positions.slice(0, N * N);
+}
+
+function scatterPieces() {
+  const totalPieces = puzzleGridSize * puzzleGridSize;
+  const shuffled = [...puzzlePieces];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  // Never present the entire photograph in its original row/column order.
+  if (shuffled.length > 1 && shuffled.every((piece, i) => piece === puzzlePieces[i])) {
+    shuffled.push(shuffled.shift());
+  }
+  const positions = getScatterPositions();
 
   // Clear slots
   gridSlots = Array(totalPieces).fill(null);
-
-  puzzlePieces.forEach((p, i) => {
+  activeDraggedPiece = null;
+  touchDragPiece = null;
+  shuffled.forEach((p, i) => {
     p.currentSlot = null;
+    p.scatterIndex = i;
     p.rotation = (Math.random() - 0.5) * 0.12;
-
-    const margin = 10;
-    const minY = boardRect.y + boardRect.size + 12;
-    const maxY = h - 94 - pieceW;
-
-    if (maxY > minY) {
-      // Place in rows below the board
-      const cols = N;
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const stepX = (w - margin * 2 - pieceW) / Math.max(1, cols - 1);
-      const rows = N;
-      const stepY = (maxY - minY) / Math.max(1, rows - 1);
-      p.currentX = margin + col * stepX + (Math.random() - 0.5) * 6;
-      p.currentY = minY + row * stepY + (Math.random() - 0.5) * 6;
-    } else {
-      // Small screen: scatter around canvas edges
-      const angle = (i / totalPieces) * Math.PI * 2;
-      const radius = Math.min(w, h) * 0.38;
-      p.currentX = Math.max(10, Math.min(w - pieceW - 10, w / 2 + Math.cos(angle) * radius - pieceW / 2));
-      p.currentY = Math.max(76, Math.min(h - 94 - pieceW, h / 2 + Math.sin(angle) * radius - pieceW / 2));
-    }
+    p.scale = 1;
+    p.zIndex = ++maxZIndex;
+    p.currentX = positions[i].x;
+    p.currentY = positions[i].y;
   });
 
   if (currentState === STATE.SOLVED) {
@@ -766,8 +811,9 @@ function checkDropPiece(piece) {
         gridSlots[oldSlot] = existingPiece;
       } else {
         existingPiece.currentSlot = null;
-        existingPiece.currentX += (Math.random() - 0.5) * 30;
-        existingPiece.currentY = boardRect.y + boardRect.size + 15 + Math.random() * 20;
+        const position = getScatterPositions()[existingPiece.scatterIndex];
+        existingPiece.currentX = position.x;
+        existingPiece.currentY = position.y;
       }
     } else if (piece.currentSlot !== null && piece.currentSlot !== bestSlot) {
       gridSlots[piece.currentSlot] = null;
@@ -1100,12 +1146,7 @@ function render() {
     }
   }
 
-  // 2. Render Hand Landmarks Overlay (during PUZZLE if not touch-dragging)
-  if ((currentState === STATE.PUZZLE || currentState === STATE.SOLVED) && !touchDragPiece) {
-    renderHandOverlays();
-  }
-
-  // 3. Render Fist Progress Meter (during SOLVED)
+  // 2. Render Fist Progress Meter (during SOLVED)
   if (currentState === STATE.SOLVED && fistHoldProgress > 0) {
     const fistHand = detectedHands.find(h => h.isFist);
     if (fistHand) {
@@ -1113,10 +1154,10 @@ function render() {
     }
   }
 
-  // 4. Update & Draw Confetti
+  // 3. Update & Draw Confetti
   updateConfetti();
 
-  // 5. Process Gestures
+  // 4. Process Gestures
   processGestures(now);
 
   requestAnimationFrame(render);
@@ -1186,22 +1227,6 @@ function drawPuzzlePiece(p) {
   ctx.restore();
 }
 
-function renderHandOverlays() {
-  for (const hand of detectedHands) {
-    if (hand.isPinching) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(hand.pinchPos.x, hand.pinchPos.y, 16, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(26, 115, 232, 0.4)';
-      ctx.fill();
-      ctx.strokeStyle = '#1a73e8';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-}
-
 function drawFistMeter(pos, progress) {
   ctx.save();
   ctx.beginPath();
@@ -1240,10 +1265,19 @@ function updateConfetti() {
 // UI Event Handlers
 // -----------------------------------------------------------------------------
 btnStartCam.addEventListener('click', async () => {
+  if (btnStartCam.disabled) return;
+  btnStartCam.disabled = true;
   initAudio();
-  await startCamera();
-  await initMediaPipe();
-  processVideoFrame();
+  try {
+    await startCamera();
+    await initMediaPipe();
+  } finally {
+    btnStartCam.disabled = false;
+  }
+  if (!videoProcessingStarted) {
+    videoProcessingStarted = true;
+    processVideoFrame();
+  }
 });
 
 btnFlipCam.addEventListener('click', async () => {
@@ -1300,6 +1334,7 @@ if (btnDiffEasy && btnDiffHard) {
     if (capturedImage && (currentState === STATE.PUZZLE || currentState === STATE.SOLVED)) {
       buildPuzzlePieces();
     }
+    updateInstructionUI();
   });
 
   btnDiffHard.addEventListener('click', () => {
@@ -1311,6 +1346,7 @@ if (btnDiffEasy && btnDiffHard) {
     if (capturedImage && (currentState === STATE.PUZZLE || currentState === STATE.SOLVED)) {
       buildPuzzlePieces();
     }
+    updateInstructionUI();
   });
 }
 
